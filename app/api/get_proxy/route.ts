@@ -3,26 +3,6 @@ import { type NextRequest, NextResponse } from "next/server"
 // 从环境变量获取API密钥
 const API_KEY = process.env.PROXY_API_KEY
 
-export async function GET(request: NextRequest) {
-  return handleProxy(request, "GET")
-}
-
-export async function POST(request: NextRequest) {
-  return handleProxy(request, "POST")
-}
-
-export async function PUT(request: NextRequest) {
-  return handleProxy(request, "PUT")
-}
-
-export async function DELETE(request: NextRequest) {
-  return handleProxy(request, "DELETE")
-}
-
-export async function PATCH(request: NextRequest) {
-  return handleProxy(request, "PATCH")
-}
-
 function validateApiKey(request: NextRequest): boolean {
   // 如果没有设置API密钥，则允许所有请求（向后兼容）
   if (!API_KEY) {
@@ -45,7 +25,7 @@ function validateApiKey(request: NextRequest): boolean {
   return providedKey === API_KEY
 }
 
-async function handleProxy(request: NextRequest, method: string) {
+export async function GET(request: NextRequest) {
   const startTime = Date.now()
 
   try {
@@ -67,16 +47,41 @@ async function handleProxy(request: NextRequest, method: string) {
       )
     }
 
-    // 从查询参数中获取目标URL
+    // 从查询参数中获取配置
     const { searchParams } = new URL(request.url)
     const targetUrl = searchParams.get("url")
+    const method = (searchParams.get("method") || "GET").toUpperCase()
+    const headersParam = searchParams.get("headers")
+    const bodyParam = searchParams.get("body") || searchParams.get("data")
 
     if (!targetUrl) {
       return NextResponse.json(
         {
           error: "缺少目标URL参数",
           message: "请在查询参数中提供 ?url=目标地址",
-          example: "/api/proxy?url=https://jsonplaceholder.typicode.com/posts/1&key=YOUR_API_KEY",
+          example: '/api/get_proxy?url=https://api.example.com&method=POST&body={"key":"value"}&key=YOUR_API_KEY',
+          parameters: {
+            url: "目标URL (必需)",
+            method: "HTTP方法 (可选，默认GET)",
+            headers: "请求头JSON字符串 (可选)",
+            body: "请求体内容 (可选)",
+            data: "请求体内容的别名 (可选)",
+            key: "API密钥 (如果启用认证)",
+          },
+        },
+        { status: 400 },
+      )
+    }
+
+    // 验证HTTP方法
+    const allowedMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+    if (!allowedMethods.includes(method)) {
+      return NextResponse.json(
+        {
+          error: "不支持的HTTP方法",
+          method: method,
+          allowedMethods: allowedMethods,
+          message: "请使用支持的HTTP方法",
         },
         { status: 400 },
       )
@@ -141,7 +146,7 @@ async function handleProxy(request: NextRequest, method: string) {
       )
     }
 
-    // 检查端口号（Vercel可能限制某些端口）
+    // 检查端口号
     if (parsedUrl.port && !["80", "443", "8080", "8443"].includes(parsedUrl.port)) {
       return NextResponse.json(
         {
@@ -153,7 +158,7 @@ async function handleProxy(request: NextRequest, method: string) {
       )
     }
 
-    console.log(`[Proxy] ${method} ${targetUrl} - API Key: ${API_KEY ? "验证通过" : "未设置"}`)
+    console.log(`[GET Proxy] ${method} ${targetUrl} - API Key: ${API_KEY ? "验证通过" : "未设置"}`)
 
     // 准备转发的请求头
     const forwardHeaders: Record<string, string> = {}
@@ -180,7 +185,6 @@ async function handleProxy(request: NextRequest, method: string) {
           // 只有当这个头不是用于代理认证时才转发
           const authHeader = request.headers.get("authorization")
           const apiKeyHeader = request.headers.get("x-api-key")
-          const { searchParams } = new URL(request.url)
           const apiKeyParam = searchParams.get("key") || searchParams.get("apikey") || searchParams.get("api_key")
 
           // 如果这个Authorization头不是用于代理认证的，就转发它
@@ -210,8 +214,28 @@ async function handleProxy(request: NextRequest, method: string) {
       }
     })
 
+    // 解析自定义请求头
+    if (headersParam) {
+      try {
+        const customHeaders = JSON.parse(headersParam)
+        if (typeof customHeaders === "object" && customHeaders !== null) {
+          Object.assign(forwardHeaders, customHeaders)
+        }
+      } catch (headerError) {
+        return NextResponse.json(
+          {
+            error: "无效的请求头格式",
+            headers: headersParam,
+            message: "请求头必须是有效的JSON格式",
+            example: '{"Authorization": "Bearer token", "Content-Type": "application/json"}',
+          },
+          { status: 400 },
+        )
+      }
+    }
+
     // 设置用户代理
-    forwardHeaders["User-Agent"] = "Vercel-HTTP-Proxy/1.0"
+    forwardHeaders["User-Agent"] = "Vercel-GET-Proxy/1.0"
 
     // 准备请求选项
     const requestOptions: RequestInit = {
@@ -221,18 +245,30 @@ async function handleProxy(request: NextRequest, method: string) {
       signal: AbortSignal.timeout(25000),
     }
 
-    // 对于有请求体的方法，转发请求体
-    if (["POST", "PUT", "PATCH"].includes(method)) {
+    // 处理请求体
+    if (["POST", "PUT", "PATCH"].includes(method) && bodyParam) {
       try {
-        const body = await request.text()
-        if (body) {
-          requestOptions.body = body
+        // 尝试解析为JSON，如果失败则作为纯文本
+        const processedBody = bodyParam
+        try {
+          // 检查是否是有效的JSON
+          JSON.parse(bodyParam)
+          // 如果没有设置Content-Type，设置为application/json
+          if (!forwardHeaders["Content-Type"] && !forwardHeaders["content-type"]) {
+            forwardHeaders["Content-Type"] = "application/json"
+          }
+        } catch {
+          // 不是JSON，作为纯文本处理
+          if (!forwardHeaders["Content-Type"] && !forwardHeaders["content-type"]) {
+            forwardHeaders["Content-Type"] = "text/plain"
+          }
         }
+        requestOptions.body = processedBody
       } catch (bodyError) {
-        console.error("读取请求体失败:", bodyError)
         return NextResponse.json(
           {
-            error: "读取请求体失败",
+            error: "处理请求体失败",
+            body: bodyParam,
             details: bodyError instanceof Error ? bodyError.message : "未知错误",
           },
           { status: 400 },
@@ -246,9 +282,9 @@ async function handleProxy(request: NextRequest, method: string) {
       response = await fetch(targetUrl, requestOptions)
     } catch (fetchError) {
       const duration = Date.now() - startTime
-      console.error(`[Proxy Error] ${method} ${targetUrl} - ${duration}ms:`, fetchError)
+      console.error(`[GET Proxy Error] ${method} ${targetUrl} - ${duration}ms:`, fetchError)
 
-      // 提供更详细的错误信息和诊断
+      // 提供更详细的错误信息
       let errorMessage = "网络请求失败"
       let errorDetails = fetchError instanceof Error ? fetchError.message : "未知错误"
       let suggestions: string[] = []
@@ -270,18 +306,6 @@ async function handleProxy(request: NextRequest, method: string) {
           errorMessage = "SSL证书错误"
           errorDetails = "目标网站的SSL证书有问题"
           suggestions = ["证书可能已过期", "证书可能不受信任", "尝试使用HTTP而非HTTPS"]
-        } else if (fetchError.message.includes("timeout")) {
-          errorMessage = "连接超时"
-          errorDetails = "连接目标服务器超时"
-          suggestions = ["网络连接可能不稳定", "目标服务器可能过载"]
-        } else if (fetchError.message.includes("ECONNRESET")) {
-          errorMessage = "连接被重置"
-          errorDetails = "连接在传输过程中被重置"
-          suggestions = ["网络不稳定", "服务器主动断开连接", "可能遇到了速率限制"]
-        } else if (fetchError.message.includes("EHOSTUNREACH")) {
-          errorMessage = "主机不可达"
-          errorDetails = "无法到达目标主机"
-          suggestions = ["网络路由问题", "目标服务器可能离线", "防火墙可能阻止了访问"]
         } else if (fetchError.message === "fetch failed") {
           errorMessage = "网络请求失败"
           errorDetails = "通用网络错误，可能的原因包括："
@@ -295,20 +319,6 @@ async function handleProxy(request: NextRequest, method: string) {
         }
       }
 
-      // 尝试进行简单的连通性测试
-      let connectivityTest = "未测试"
-      try {
-        const testUrl = new URL(targetUrl)
-        const simpleTestUrl = `${testUrl.protocol}//${testUrl.hostname}`
-        const testResponse = await fetch(simpleTestUrl, {
-          method: "HEAD",
-          signal: AbortSignal.timeout(5000),
-        })
-        connectivityTest = `基础连接测试: ${testResponse.status}`
-      } catch (testError) {
-        connectivityTest = `基础连接测试失败: ${testError instanceof Error ? testError.message : "未知错误"}`
-      }
-
       return NextResponse.json(
         {
           error: errorMessage,
@@ -318,12 +328,11 @@ async function handleProxy(request: NextRequest, method: string) {
           method,
           duration: `${duration}ms`,
           timestamp: new Date().toISOString(),
-          connectivityTest,
-          troubleshooting: {
-            检查URL: "确认URL格式正确且可访问",
-            测试连接: "在浏览器中直接访问该URL",
-            检查状态: "查看目标网站是否正常运行",
-            网络诊断: "使用ping或traceroute检查网络连接",
+          requestConfig: {
+            url: targetUrl,
+            method: method,
+            headers: Object.keys(forwardHeaders),
+            hasBody: !!bodyParam,
           },
         },
         { status: 502 },
@@ -374,9 +383,11 @@ async function handleProxy(request: NextRequest, method: string) {
     responseHeaders.set("X-Proxy-Status", "success")
     responseHeaders.set("X-Proxy-Duration", `${Date.now() - startTime}ms`)
     responseHeaders.set("X-Proxy-Auth", API_KEY ? "required" : "disabled")
+    responseHeaders.set("X-Proxy-Method", method)
+    responseHeaders.set("X-Proxy-Type", "get_proxy")
 
     const duration = Date.now() - startTime
-    console.log(`[Proxy Success] ${method} ${targetUrl} - ${response.status} - ${duration}ms`)
+    console.log(`[GET Proxy Success] ${method} ${targetUrl} - ${response.status} - ${duration}ms`)
 
     // 返回代理响应
     return new NextResponse(responseText, {
@@ -386,11 +397,11 @@ async function handleProxy(request: NextRequest, method: string) {
     })
   } catch (error) {
     const duration = Date.now() - startTime
-    console.error(`[Proxy Unexpected Error] ${method} - ${duration}ms:`, error)
+    console.error(`[GET Proxy Unexpected Error] - ${duration}ms:`, error)
 
     return NextResponse.json(
       {
-        error: "代理服务内部错误",
+        error: "GET代理服务内部错误",
         details: error instanceof Error ? error.message : "未知错误",
         duration: `${duration}ms`,
         timestamp: new Date().toISOString(),
@@ -417,7 +428,7 @@ export async function OPTIONS(request: NextRequest) {
     status: 200,
     headers: {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Access-Control-Allow-Headers": "*",
       "Access-Control-Max-Age": "86400",
     },

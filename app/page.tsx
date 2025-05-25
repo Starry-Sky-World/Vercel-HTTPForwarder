@@ -10,8 +10,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Copy, Send, Globe, Code, Key, Settings } from "lucide-react"
-import Link from "next/link"
+import { Copy, Send, Globe, Code, Key, Settings, Link } from "lucide-react"
+import NextLink from "next/link"
 
 export default function ProxyTester() {
   const [url, setUrl] = useState("")
@@ -22,6 +22,7 @@ export default function ProxyTester() {
   const [loading, setLoading] = useState(false)
   const [responseStatus, setResponseStatus] = useState<number | null>(null)
   const [apiKey, setApiKey] = useState("")
+  const [proxyType, setProxyType] = useState<"normal" | "get">("normal")
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -32,56 +33,97 @@ export default function ProxyTester() {
     setResponseStatus(null)
 
     try {
-      // 构建代理URL，如果有API密钥则添加到URL参数中
-      let proxyUrl = `/api/proxy?url=${encodeURIComponent(url)}`
-      if (apiKey) {
-        proxyUrl += `&key=${encodeURIComponent(apiKey)}`
-      }
+      let proxyUrl: string
+      let requestOptions: RequestInit
 
-      const requestHeaders: Record<string, string> = {}
+      if (proxyType === "get") {
+        // 使用GET代理
+        const params = new URLSearchParams()
+        params.set("url", url)
+        params.set("method", method)
 
-      // 如果有API密钥，也添加到请求头中（双重保险）
-      if (apiKey) {
-        requestHeaders["X-API-Key"] = apiKey
-      }
+        if (apiKey) {
+          params.set("key", apiKey)
+        }
 
-      // 解析自定义请求头
-      if (headers.trim()) {
-        try {
-          const customHeaders = JSON.parse(headers)
-          Object.assign(requestHeaders, customHeaders)
-        } catch {
-          // 如果不是JSON格式，尝试解析为键值对格式
-          const lines = headers.split("\n")
-          lines.forEach((line) => {
-            const [key, ...valueParts] = line.split(":")
-            if (key && valueParts.length > 0) {
-              requestHeaders[key.trim()] = valueParts.join(":").trim()
+        if (headers.trim()) {
+          try {
+            const customHeaders = JSON.parse(headers)
+            params.set("headers", JSON.stringify(customHeaders))
+          } catch {
+            // 如果不是JSON格式，尝试解析为键值对格式
+            const headerObj: Record<string, string> = {}
+            const lines = headers.split("\n")
+            lines.forEach((line) => {
+              const [key, ...valueParts] = line.split(":")
+              if (key && valueParts.length > 0) {
+                headerObj[key.trim()] = valueParts.join(":").trim()
+              }
+            })
+            if (Object.keys(headerObj).length > 0) {
+              params.set("headers", JSON.stringify(headerObj))
             }
-          })
+          }
+        }
+
+        if (["POST", "PUT", "PATCH"].includes(method) && body) {
+          params.set("body", body)
+        }
+
+        proxyUrl = `/api/get_proxy?${params.toString()}`
+        requestOptions = { method: "GET" }
+      } else {
+        // 使用普通代理
+        proxyUrl = `/api/proxy?url=${encodeURIComponent(url)}`
+        if (apiKey) {
+          proxyUrl += `&key=${encodeURIComponent(apiKey)}`
+        }
+
+        const requestHeaders: Record<string, string> = {}
+
+        // 如果有API密钥，也添加到请求头中（双重保险）
+        if (apiKey) {
+          requestHeaders["X-API-Key"] = apiKey
+        }
+
+        // 解析自定义请求头
+        if (headers.trim()) {
+          try {
+            const customHeaders = JSON.parse(headers)
+            Object.assign(requestHeaders, customHeaders)
+          } catch {
+            // 如果不是JSON格式，尝试解析为键值对格式
+            const lines = headers.split("\n")
+            lines.forEach((line) => {
+              const [key, ...valueParts] = line.split(":")
+              if (key && valueParts.length > 0) {
+                requestHeaders[key.trim()] = valueParts.join(":").trim()
+              }
+            })
+          }
+        }
+
+        // 如果没有设置Content-Type且有请求体，设置默认值
+        if (["POST", "PUT", "PATCH"].includes(method) && body && !requestHeaders["Content-Type"]) {
+          try {
+            JSON.parse(body)
+            requestHeaders["Content-Type"] = "application/json"
+          } catch {
+            requestHeaders["Content-Type"] = "text/plain"
+          }
+        }
+
+        requestOptions = {
+          method,
+          headers: requestHeaders,
+        }
+
+        if (["POST", "PUT", "PATCH"].includes(method) && body) {
+          requestOptions.body = body
         }
       }
 
-      // 如果没有设置Content-Type且有请求体，设置默认值
-      if (["POST", "PUT", "PATCH"].includes(method) && body && !requestHeaders["Content-Type"]) {
-        try {
-          JSON.parse(body)
-          requestHeaders["Content-Type"] = "application/json"
-        } catch {
-          requestHeaders["Content-Type"] = "text/plain"
-        }
-      }
-
-      const requestOptions: RequestInit = {
-        method,
-        headers: requestHeaders,
-      }
-
-      if (["POST", "PUT", "PATCH"].includes(method) && body) {
-        requestOptions.body = body
-      }
-
-      console.log("发送代理请求:", { url: proxyUrl, method, headers: requestHeaders })
+      console.log("发送代理请求:", { url: proxyUrl, type: proxyType, method, options: requestOptions })
 
       const res = await fetch(proxyUrl, requestOptions)
       setResponseStatus(res.status)
@@ -140,6 +182,7 @@ export default function ProxyTester() {
             timestamp: new Date().toISOString(),
             targetUrl: url,
             method: method,
+            proxyType: proxyType,
           },
           null,
           2,
@@ -152,6 +195,44 @@ export default function ProxyTester() {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text)
+  }
+
+  const generateGetProxyUrl = () => {
+    if (!url) return ""
+
+    const params = new URLSearchParams()
+    params.set("url", url)
+    params.set("method", method)
+
+    if (apiKey) {
+      params.set("key", apiKey)
+    }
+
+    if (headers.trim()) {
+      try {
+        const customHeaders = JSON.parse(headers)
+        params.set("headers", JSON.stringify(customHeaders))
+      } catch {
+        // 如果不是JSON格式，尝试解析为键值对格式
+        const headerObj: Record<string, string> = {}
+        const lines = headers.split("\n")
+        lines.forEach((line) => {
+          const [key, ...valueParts] = line.split(":")
+          if (key && valueParts.length > 0) {
+            headerObj[key.trim()] = valueParts.join(":").trim()
+          }
+        })
+        if (Object.keys(headerObj).length > 0) {
+          params.set("headers", JSON.stringify(headerObj))
+        }
+      }
+    }
+
+    if (["POST", "PUT", "PATCH"].includes(method) && body) {
+      params.set("body", body)
+    }
+
+    return `${window.location.origin}/api/get_proxy?${params.toString()}`
   }
 
   const exampleUrls = [
@@ -173,12 +254,12 @@ export default function ProxyTester() {
           </div>
           <p className="text-lg text-gray-600">通过 Vercel 转发 HTTP 请求，解决跨域问题</p>
           <div className="mt-4">
-            <Link href="/admin">
+            <NextLink href="/admin">
               <Button variant="outline" className="gap-2">
                 <Settings className="w-4 h-4" />
                 管理面板
               </Button>
-            </Link>
+            </NextLink>
           </div>
         </div>
 
@@ -206,6 +287,24 @@ export default function ProxyTester() {
                     onChange={(e) => setApiKey(e.target.value)}
                   />
                   <p className="text-xs text-gray-500 mt-1">如果代理服务启用了认证，需要提供有效的API密钥</p>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-2 block">代理类型</label>
+                  <Select value={proxyType} onValueChange={(value: "normal" | "get") => setProxyType(value)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="normal">普通代理 (/api/proxy)</SelectItem>
+                      <SelectItem value="get">GET代理 (/api/get_proxy)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {proxyType === "get"
+                      ? "通过GET请求执行任何HTTP方法，所有参数通过URL传递"
+                      : "标准代理模式，保持原始HTTP方法"}
+                  </p>
                 </div>
 
                 <div className="flex gap-2">
@@ -272,6 +371,28 @@ Content-Type: application/json`}
                   </TabsContent>
                 </Tabs>
 
+                {proxyType === "get" && url && (
+                  <div>
+                    <label className="text-sm font-medium mb-2 block flex items-center gap-2">
+                      <Link className="w-4 h-4" />
+                      生成的GET代理URL
+                    </label>
+                    <div className="relative">
+                      <Textarea value={generateGetProxyUrl()} readOnly rows={3} className="font-mono text-xs" />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="absolute top-2 right-2"
+                        onClick={() => copyToClipboard(generateGetProxyUrl())}
+                      >
+                        <Copy className="w-4 h-4" />
+                      </Button>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">您可以直接在浏览器中访问此URL或在其他应用中使用</p>
+                  </div>
+                )}
+
                 <Button type="submit" disabled={loading || !url} className="w-full">
                   {loading ? "发送中..." : "发送请求"}
                 </Button>
@@ -323,6 +444,7 @@ Content-Type: application/json`}
                 {responseStatus && (
                   <Badge variant={responseStatus < 400 ? "default" : "destructive"}>{responseStatus}</Badge>
                 )}
+                {proxyType === "get" && <Badge variant="outline">GET代理</Badge>}
               </CardTitle>
               <CardDescription>查看代理请求的响应内容</CardDescription>
             </CardHeader>
@@ -363,14 +485,19 @@ Content-Type: application/json`}
                   <h4 className="font-semibold mb-2">请求信息:</h4>
                   <div className="bg-gray-50 p-3 rounded text-sm">
                     <p>
+                      <strong>代理类型:</strong> {proxyType === "get" ? "GET代理" : "普通代理"}
+                    </p>
+                    <p>
                       <strong>方法:</strong> {method}
                     </p>
                     <p>
                       <strong>目标URL:</strong> {url}
                     </p>
                     <p>
-                      <strong>代理URL:</strong> /api/proxy?url={encodeURIComponent(url)}
-                      {apiKey && "&key=***"}
+                      <strong>代理URL:</strong>{" "}
+                      {proxyType === "get"
+                        ? "/api/get_proxy?..."
+                        : `/api/proxy?url=${encodeURIComponent(url)}${apiKey ? "&key=***" : ""}`}
                     </p>
                     <p>
                       <strong>API密钥:</strong> {apiKey ? "已设置" : "未设置"}
@@ -414,7 +541,12 @@ Content-Type: application/json`}
           <CardContent className="space-y-4">
             <div>
               <h3 className="font-semibold mb-2">API 端点:</h3>
-              <code className="bg-gray-100 px-2 py-1 rounded text-sm">/api/proxy?url=目标URL&key=API密钥</code>
+              <div className="space-y-2">
+                <code className="bg-gray-100 px-2 py-1 rounded text-sm block">/api/proxy?url=目标URL&key=API密钥</code>
+                <code className="bg-gray-100 px-2 py-1 rounded text-sm block">
+                  /api/get_proxy?url=目标URL&method=POST&body=数据&key=API密钥
+                </code>
+              </div>
             </div>
 
             <div>
@@ -437,15 +569,23 @@ Content-Type: application/json`}
                 <li>保持原始响应状态码和头信息</li>
                 <li>错误处理和日志记录</li>
                 <li>🔒 API密钥认证保护</li>
+                <li>🆕 GET代理模式 - 通过GET请求执行任何HTTP方法</li>
               </ul>
             </div>
 
             <div>
-              <h3 className="font-semibold mb-2">使用示例:</h3>
-              <code className="bg-gray-100 px-2 py-1 rounded text-sm block">
-                curl "https://your-domain.vercel.app/api/proxy?url=https://api.example.com/data&key=YOUR_API_KEY"
-              </code>
+              <h3 className="font-semibold mb-2">GET代理使用示例:</h3>
+              <div className="bg-gray-100 p-3 rounded">
+                <code className="text-sm whitespace-pre-wrap">
+                  {`# 通过GET请求发送POST数据
+GET /api/get_proxy?url=https://api.example.com/data&method=POST&body={"key":"value"}&key=YOUR_API_KEY
+
+# 通过GET请求发送带认证头的请求
+GET /api/get_proxy?url=https://api.example.com&headers={"Authorization":"Bearer token"}&key=YOUR_API_KEY`}
+                </code>
+              </div>
             </div>
+
             <div>
               <h3 className="font-semibold mb-2 text-amber-600">URL限制说明:</h3>
               <ul className="list-disc list-inside space-y-1 text-sm text-amber-700 bg-amber-50 p-3 rounded">
@@ -463,6 +603,15 @@ Content-Type: application/json`}
                 <li>支持多种认证方式 (URL参数、请求头)</li>
                 <li>环境变量安全存储</li>
                 <li>请求日志和监控</li>
+              </ul>
+            </div>
+            <div>
+              <h3 className="font-semibold mb-2 text-blue-600">🆕 GET代理优势:</h3>
+              <ul className="list-disc list-inside space-y-1 text-sm text-blue-700 bg-blue-50 p-3 rounded">
+                <li>可以在浏览器地址栏直接访问</li>
+                <li>方便在不支持复杂HTTP方法的环境中使用</li>
+                <li>所有参数通过URL传递，便于调试和分享</li>
+                <li>支持所有HTTP方法，包括POST、PUT、DELETE等</li>
               </ul>
             </div>
           </CardContent>
